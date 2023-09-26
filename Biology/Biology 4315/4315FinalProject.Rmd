@@ -1,0 +1,741 @@
+---
+title: "BIOL-4315 Final Project"
+author: "Gavin Ieong"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir ='/Users/Gavin/Documents/4315FinalProject/rnaseq')
+knitr::include_graphics('/Users/Gavin/Documents/4315FinalProject/rnaseq')
+
+```
+
+
+# Project: Comparing Alignment Results of Two Different Aligners (Bowtie2 and Hisat2)
+
+## Preparations: Install all needed packages
+
+ This includes many packages from Bioconductor such as systemPipeR, and pheatmap. Furthermore, it includes an DEG analysis tool such as edgeR and deSeq2 
+```{r installPackages,eval = FALSE}
+
+install.packages('docopt')
+install.packages("DT")
+install.packages('pheatmap')
+BiocManager::install("Rbowtie")
+BiocManager::install("GenomicFeatures")
+BiocManager::install("DESeq2")
+BiocManager::install("edgeR")
+BiocManager::install("systemPipeR")
+BiocManager::install("systemPipeRdata")
+BiocManager::install("BiocStyle")
+BiocManager::install("GO.db")
+BiocManager::install("Rsubread")
+
+```
+
+
+
+ Here we load the needed packages and also set up the enviroment $Path as Hisat2 and Bowtie 2 will be called from the terminal
+```{r loadLibraries, message=FALSE}
+library(systemPipeRdata)
+library(systemPipeR)
+
+Sys.setenv(PATH="/opt/anaconda3/condabin:/opt/anaconda3/bin:/opt/anaconda3/lib:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Library/Apple/usr/bin:/Users/Gavin/documents/hisat2-2.2.1:/Users/Gavin/documents/sratoolkit.2.11.3-mac64/bin:/Users/Gavin/documents/blast-2.13.0/bin:/Users/Gavin/documents/bowtie2")
+system("echo $PATH")
+
+```
+
+
+
+ use genWorkenvir() to create a new directory and workflow which will contain all the needed files and data for our project experiment
+```{r createDirectory, eval=FALSE}
+getwd()
+if(file.exists("rnaseq"))
+   {
+     print("Directory exists, skipping this step")
+     }
+   else{
+     genWorkenvir(workflow = "rnaseq")
+   }
+```
+
+
+
+ Now we can start the project by creating a SRAproject(). 
+
+**Note: CWL files contain the commands needed
+CWL define the parameters of a chosen command-line step or workflow, while files with the extension .yml define the input variables of command-line steps **
+```{r StartingProject, cache = TRUE, eval = F}
+
+targetspath <- "targetsPE.txt"
+targets <- read.delim(targetspath, comment.char = "#")
+DT::datatable(targets, options = list(scrollX = TRUE, autoWidth = TRUE))
+
+
+finalProject <- SPRproject()
+
+```
+
+
+## Preprocess the reads. 
+
+After setting up our needed packages, libraries, and files, the first step is to preprocess the reads.
+To accomplish this task, we will first add a step to load systemPipeR into our project,
+then trim the reads with ShortReads, and output a fastq file Report to visualize read length, quality, etc
+```{r Preproccessing, eval = F}
+## Step one, load SystemPipeR for project
+appendStep(finalProject) <- LineWise(code = {
+  library(systemPipeR)
+}, step_name = "load_SPR")
+
+
+## Step 2, preprocess the reads
+appendStep(finalProject) <- SYSargsList(step_name = "preprocessing", targets = "targetsPE.txt",
+                               dir = TRUE, wf_file = "preprocessReads/preprocessReads-pe.cwl",
+                               input_file = "preprocessReads/preprocessReads-pe.yml", dir_path = "param/cwl",
+                               inputvars = c(FileName1 = "_FASTQ_PATH1_", FileName2 = "_FASTQ_PATH2_", SampleName = "_SampleName_"),
+                               dependency = c("load_SPR"))
+
+
+## Step 3, print fastq_report on the reads
+appendStep(finalProject) <- LineWise(code = {
+  fastq <- getColumn(finalProject, step = "preprocessing", "targetsWF",
+                     column = 1)
+  fqlist <- seeFastq(fastq = fastq, batchsize = 10000, klength = 8)
+  pdf("./results/fastqReport.pdf", height = 18, width = 4 *
+        length(fqlist))
+  seeFastqPlot(fqlist)
+  dev.off()
+}, step_name = "fastq_report", dependency = "preprocessing")
+
+
+```
+
+
+This is the report of our reads.
+```{r sample report}
+
+knitr::include_graphics("png/fastqReport.png")
+```
+
+## Alignments (Indexing and Mapping) with Bowtie2 and Hisat2
+
+
+After we have the needed reads, we must use an aligner to map and index before we can further examine them.
+The first aligner we will add to the project steps is Bowtie2. This is a two step proccess, as it will first index before mapping.
+```{r read Map and index With bowtie2, cache = TRUE, eval =F}
+
+## These two steps will index and map for Bowtie2
+appendStep(finalProject) <- SYSargsList(step_name = "bowtie_index",  dir = FALSE,
+                               targets = NULL,
+                               wf_file = "bowtie2/bowtie2-idx/bowtie2-index.cwl", 
+                               input_file = "bowtie2/bowtie2-idx/bowtie2-index.yml", 
+                               dir_path = "param/cwl",
+                               dependency = "preprocessing")
+
+appendStep(finalProject) <- SYSargsList(step_name = "bowtie2_mapping", 
+                               dir = TRUE, targets = "preprocessing",
+                               wf_file = "workflow-bowtie2/workflow_bowtie2-pe.cwl", 
+                               input_file = "workflow-bowtie2/workflow_bowtie2-pe.yml", 
+                               dir_path = "param/cwl",
+                               inputvars=c(preprocessReads_1 = "_FASTQ_PATH1_", preprocessReads_2 = "_FASTQ_PATH2_", SampleName="_SampleName_"),
+                               rm_targets_col = c("FileName1","FileName2"),
+                               dependency = c("bowtie_index"))
+
+
+```
+
+
+The next aligner is Hisat2, and once again it is a two step process with indexing before mapping.
+```{r, read Map and index With hisat2, cache = TRUE, eval = F}
+
+## These two steps will create a index and mapping for hisat2
+appendStep(finalProject) <- SYSargsList(step_name = "hisat2_index", dir = FALSE,
+                               targets = NULL, wf_file = "hisat2/hisat2-index.cwl", input_file = "hisat2/hisat2-index.yml",
+                               dir_path = "param/cwl", dependency = "preprocessing")
+
+
+appendStep(finalProject) <- SYSargsList(step_name = "hisat2_mapping",
+                               dir = TRUE, targets = "preprocessing", wf_file = "workflow-hisat2/workflow_hisat2-pe.cwl",
+                               input_file = "workflow-hisat2/workflow_hisat2-pe.yml", dir_path = "param/cwl",
+                               inputvars = c(preprocessReads_1 = "_FASTQ_PATH1_", preprocessReads_2 = "_FASTQ_PATH2_",
+                                             SampleName = "_SampleName_"), rm_targets_col = c("FileName1",
+                                                                                              "FileName2"), dependency = c("hisat2_index"))
+
+
+```
+
+
+
+After indexing and mapping is done for both aligners, we can check the alignment stats for each. We will put those stats into a file called **alignStats.xls**
+and this will be one of the ways to compare the results.
+
+```{r alignment_stats, cache=TRUE, eval = FALSE}
+
+appendStep(finalProject) <- LineWise(code = {
+  fqpaths <- getColumn(finalProject, step = "preprocessing", "targetsWF",
+                       column = "FileName1")
+  bampaths <- getColumn(finalProject, step = "bowtie2_mapping", "outfiles",
+                        column = "samtools_sort_bam")
+  read_statsDF <- alignStats(args = bampaths, fqpaths = fqpaths,
+                             pairEnd = TRUE)
+  write.table(read_statsDF, "results/bowtie2_alignStats.xls", row.names = FALSE,
+              quote = FALSE, sep = "\t")
+}, step_name = "bowtie2_align_stats", dependency = "bowtie2_mapping")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  fqpaths <- getColumn(finalProject, step = "preprocessing", "targetsWF",
+                       column = "FileName1")
+  
+  bampaths <- getColumn(finalProject, step = "hisat2_mapping", "outfiles",
+                        column = "samtools_sort_bam")
+  
+  read_statsDF <- alignStats(args = bampaths, fqpaths = fqpaths,
+                             pairEnd = TRUE)
+  write.table(read_statsDF, "results/hisat2_alignStats.xls", row.names = FALSE,
+              quote = FALSE, sep = "\t")
+}, step_name = "hisat2_align_stats", dependency = "hisat2_mapping")
+
+
+```
+
+
+Next, we will output the sample data and compare the alignment rates.
+We see that the alignment numbers and percentage is lower for bowtie2 in comparision to hisat2.
+```{r check Alignment Stats}
+read.table("results/bowtie2_alignStats.xls", header = TRUE)[1:10, ]
+read.table("results/hisat2_alignStats.xls", header = TRUE)[1:10, ]
+```
+
+
+
+## Count table and Annotations
+
+A count table and db gene annotation will be created for use in later analysis of results.
+```{r countTable and gene Anno, cache=TRUE, eval=FALSE}
+## Creating a count table and db of gene annotation
+appendStep(finalProject) <- LineWise(code = {
+    library(GenomicFeatures)
+    txdb <- suppressWarnings(makeTxDbFromGFF(file = "data/tair10.gff",
+        format = "gff", dataSource = "TAIR", organism = "Arabidopsis thaliana"))
+    saveDb(txdb, file = "./data/tair10.sqlite")
+}, step_name = "create_db", dependency = c("hisat2_mapping", "bowtie2_mapping"))
+
+
+runWF(finalProject, resume = T)
+```
+
+
+The results of count number will be stored in **countDFeByg.xls**
+And the results of RPKM will be stored in **rpkmDFeByg.xls**
+```{r readCounting, eval = F}
+appendStep(finalProject) <- LineWise(code = {
+    library(GenomicFeatures)
+    library(BiocParallel)
+  
+    txdb <- loadDb("./data/tair10.sqlite")
+    outpaths <- getColumn(finalProject, step = "bowtie2_mapping", "outfiles",
+        column = "samtools_sort_bam")
+    
+    eByg <- exonsBy(txdb, by = c("gene"))
+    bfl <- BamFileList(outpaths, yieldSize = 50000, index = character())
+    multicoreParam <- MulticoreParam(workers = 4)
+    register(multicoreParam)
+    registered()
+    
+    counteByg <- bplapply(bfl, function(x) summarizeOverlaps(eByg,
+        x, mode = "Union", ignore.strand = TRUE, inter.feature = FALSE,
+        singleEnd = FALSE, BPPARAM = multicoreParam))
+    countDFeByg <- sapply(seq(along = counteByg), function(x) assays(counteByg[[x]])$counts)
+    rownames(countDFeByg) <- names(rowRanges(counteByg[[1]]))
+    colnames(countDFeByg) <- names(bfl)
+    rpkmDFeByg <- apply(countDFeByg, 2, function(x) returnRPKM(counts = x,
+        ranges = eByg))
+    write.table(countDFeByg, "results/bowtie2_countDFeByg.xls", col.names = NA,
+        quote = FALSE, sep = "\t")
+    write.table(rpkmDFeByg, "results/bowtie2_rpkmDFeByg.xls", col.names = NA,
+        quote = FALSE, sep = "\t")
+    
+    ## Creating a SummarizedExperiment object
+    colData <- data.frame(row.names = SampleName(finalProject, "bowtie2_mapping"),
+        condition = getColumn(finalProject, "bowtie2_mapping", position = "targetsWF",
+            column = "Factor"))
+    colData$condition <- factor(colData$condition)
+    countDF_se <- SummarizedExperiment::SummarizedExperiment(assays = countDFeByg,
+        colData = colData)
+    
+    ## Add results as SummarizedExperiment to the workflow
+    ## object
+    SE(finalProject, "bowtie2_read_counting") <- countDF_se
+}, step_name = "bowtie2_read_counting", dependency = "create_db")
+
+
+
+
+
+appendStep(finalProject) <- LineWise(code = {
+    library(GenomicFeatures)
+    library(BiocParallel)
+  
+    txdb <- loadDb("./data/tair10.sqlite")
+    outpaths <- getColumn(finalProject, step = "hisat2_mapping", "outfiles",
+        column = "samtools_sort_bam")
+    
+    eByg <- exonsBy(txdb, by = c("gene"))
+    bfl <- BamFileList(outpaths, yieldSize = 50000, index = character())
+    multicoreParam <- MulticoreParam(workers = 4)
+    register(multicoreParam)
+    registered()
+    
+    counteByg <- bplapply(bfl, function(x) summarizeOverlaps(eByg,
+        x, mode = "Union", ignore.strand = TRUE, inter.feature = FALSE,
+        singleEnd = FALSE, BPPARAM = multicoreParam))
+    countDFeByg <- sapply(seq(along = counteByg), function(x) assays(counteByg[[x]])$counts)
+    rownames(countDFeByg) <- names(rowRanges(counteByg[[1]]))
+    colnames(countDFeByg) <- names(bfl)
+    rpkmDFeByg <- apply(countDFeByg, 2, function(x) returnRPKM(counts = x,
+        ranges = eByg))
+    write.table(countDFeByg, "results/hisat2_countDFeByg.xls", col.names = NA,
+        quote = FALSE, sep = "\t")
+    write.table(rpkmDFeByg, "results/hisat2_rpkmDFeByg.xls", col.names = NA,
+        quote = FALSE, sep = "\t")
+    
+    ## Creating a SummarizedExperiment object
+    colData <- data.frame(row.names = SampleName(finalProject, "hisat2_mapping"),
+        condition = getColumn(finalProject, "hisat2_mapping", position = "targetsWF",
+            column = "Factor"))
+    colData$condition <- factor(colData$condition)
+    countDF_se <- SummarizedExperiment::SummarizedExperiment(assays = countDFeByg,
+        colData = colData)
+    
+    ## Add results as SummarizedExperiment to the workflow
+    ## object
+    SE(finalProject, "hisat2_read_counting") <- countDF_se
+}, step_name = "hisat2_read_counting", dependency = "create_db")
+
+
+
+
+```
+
+
+Here are the results of the counts for hisat2 and bowtie2.
+As we can see, bowtie2 once again showed lower numbers throughout the samples.
+
+```{r counts}
+countDF <- read.delim("results/hisat2_countDFeByg.xls", row.names = 1,
+                      check.names = FALSE)[1:200, ]
+DT::datatable(countDF, options = list(scrollX = TRUE, autoWidth = TRUE))
+
+countDF <- read.delim("results/bowtie2_countDFeByg.xls", row.names = 1,
+                      check.names = FALSE)[1:200, ]
+DT::datatable(countDF, options = list(scrollX = TRUE, autoWidth = TRUE))
+```
+
+
+Here are the results of the RPKM for hisat2 and bowtie2.
+Once again, bowtie2  showed lower numbers throughout the samples and hisat2 had bigger numbers.
+```{r RPKM}
+
+## Reads per base kilo million 
+
+
+## For hisat2
+rpkm <- read.delim("results/hisat2_rpkmDFeByg.xls", 
+                   row.names = 1, check.names = FALSE)[ ,1:4]
+
+DT::datatable(rpkm, options = list(scrollX = TRUE, autoWidth = TRUE))
+
+
+
+## For Bowtie2
+rpkm <- read.delim("results/bowtie2_rpkmDFeByg.xls", 
+                   row.names = 1, check.names = FALSE)[ ,1:4]
+
+DT::datatable(rpkm, options = list(scrollX = TRUE, autoWidth = TRUE))
+```
+
+
+
+## Sample-wise correlation analysis and clustering
+
+We are using deSeq and spearman method in this step.
+```{r sampleTree, eval = F, cache = T}
+appendStep(finalProject) <- LineWise(code = {
+  library(DESeq2, quietly = TRUE)
+  library(ape, warn.conflicts = FALSE)
+  ## Extracting SummarizedExperiment object
+  se <- SE(finalProject, "bowtie2_read_counting")
+  dds <- DESeqDataSet(se, design = ~condition)
+  d <- cor(assay(rlog(dds)), method = "spearman")
+  hc <- hclust(dist(1 - d))
+  pdf("results/bowtie2_sample_tree.pdf")
+  plot.phylo(as.phylo(hc), type = "p", edge.col = "blue", edge.width = 2,
+             show.node.label = TRUE, no.margin = TRUE)
+  dev.off()
+}, step_name = "bowtie2_sample_tree", dependency = "bowtie2_read_counting")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  library(DESeq2, quietly = TRUE)
+  library(ape, warn.conflicts = FALSE)
+  ## Extracting SummarizedExperiment object
+  se <- SE(finalProject, "hisat2_read_counting")
+  dds <- DESeqDataSet(se, design = ~condition)
+  d <- cor(assay(rlog(dds)), method = "spearman")
+  hc <- hclust(dist(1 - d))
+  pdf("results/hisat2_sample_tree.pdf")
+  plot.phylo(as.phylo(hc), type = "p", edge.col = "blue", edge.width = 2,
+             show.node.label = TRUE, no.margin = TRUE)
+  dev.off()
+}, step_name = "hisat2_sample_tree", dependency = "hisat2_read_counting")
+
+```
+
+```{r sample Tree PDF}
+
+knitr::include_graphics("png/hisat2_sample_tree.png")
+knitr::include_graphics('png/bowtie2_sample_tree.png')
+```
+
+## Running  edgeR for further analysis
+```{r edger, eval=F}
+appendStep(finalProject) <- LineWise(code = {
+  library(edgeR)
+  countDF <- read.delim("results/bowtie2_countDFeByg.xls", row.names = 1,
+                        check.names = FALSE)
+  cmp <- readComp(stepsWF(finalProject)[["bowtie2_mapping"]], format = "matrix",
+                  delim = "-")
+  bowtie2_edgeDF <- run_edgeR(countDF = countDF, targets = targetsWF(finalProject)[["bowtie2_mapping"]],
+                      cmp = cmp[[1]], independent = FALSE, mdsplot = "")
+}, step_name = "bowtie2_run_edger", dependency = "bowtie2_read_counting")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  library(edgeR)
+  countDF <- read.delim("results/hisat2_countDFeByg.xls", row.names = 1,
+                        check.names = FALSE)
+  cmp <- readComp(stepsWF(finalProject)[["hisat2_mapping"]], format = "matrix",
+                  delim = "-")
+  hisat2_edgeDF <- run_edgeR(countDF = countDF, targets = targetsWF(finalProject)[["hisat2_mapping"]],
+                      cmp = cmp[[1]], independent = FALSE, mdsplot = "")
+}, step_name = "hisat2_run_edger", dependency = "hisat2_read_counting")
+```
+
+
+## Adding Gene descriptions
+The gene discriptions are obtained from plants.ensembl.org
+**Information will be stored in edgeRglm_allcomp.xls**
+```{r annotate, eval=F}
+appendStep(finalProject) <- LineWise(code = {
+  library("biomaRt")
+  m <- useMart("plants_mart", dataset = "athaliana_eg_gene",
+               host = "https://plants.ensembl.org")
+  desc <- getBM(attributes = c("tair_locus", "description"),
+                mart = m)
+  desc <- desc[!duplicated(desc[, 1]), ]
+  descv <- as.character(desc[, 2])
+  names(descv) <- as.character(desc[, 1])
+  bowtie2_edgeDF <- data.frame(bowtie2_edgeDF, Desc = descv[rownames(bowtie2_edgeDF)],
+                       check.names = FALSE)
+  write.table(bowtie2_edgeDF, "./results/bowtie2_edgeRglm_allcomp.xls", quote = FALSE,
+              sep = "\t", col.names = NA)
+}, step_name = "bowtie2_custom_annot",dependency = c("bowtie2_run_edger"))
+
+
+appendStep(finalProject) <- LineWise(code = {
+  library("biomaRt")
+  m <- useMart("plants_mart", dataset = "athaliana_eg_gene",
+               host = "https://plants.ensembl.org")
+  desc <- getBM(attributes = c("tair_locus", "description"),
+                mart = m)
+  desc <- desc[!duplicated(desc[, 1]), ]
+  descv <- as.character(desc[, 2])
+  names(descv) <- as.character(desc[, 1])
+  hisat2_edgeDF <- data.frame(hisat2_edgeDF, Desc = descv[rownames(hisat2_edgeDF)],
+                       check.names = FALSE)
+  write.table(hisat2_edgeDF, "./results/hisat2_edgeRglm_allcomp.xls", quote = FALSE,
+              sep = "\t", col.names = NA)
+}, step_name = "hisat2_custom_annot",dependency = c("hisat2_run_edger"))
+
+```
+
+
+**The filtered DEGs will be stored in DEGcounts.xls**
+```{r filter DEGs, eval = F}
+appendStep(finalProject) <- LineWise(code = {
+  bowtie2_edgeDF <- read.delim("results/bowtie2_edgeRglm_allcomp.xls", row.names = 1,
+                       check.names = FALSE)
+  pdf("results/bowtie2_DEGcounts.pdf")
+  
+  bowtie2_DEG_list <- filterDEGs(degDF = bowtie2_edgeDF, filter = c(Fold = 2,
+                                                    FDR = 20))
+  dev.off()
+  write.table( bowtie2_DEG_list$Summary, "./results/bowtie2_DEGcounts.xls",
+              quote = FALSE, sep = "\t", row.names = FALSE)
+}, step_name = "bowtie2_filter_degs", dependency = "bowtie2_custom_annot")
+
+
+
+appendStep(finalProject) <- LineWise(code = {
+  hisat2_edgeDF <- read.delim("results/hisat2_edgeRglm_allcomp.xls", row.names = 1,
+                       check.names = FALSE)
+  pdf("results/hisat2_DEGcounts.pdf")
+  hisat2_DEG_list <- filterDEGs(degDF = hisat2_edgeDF, filter = c(Fold = 2,
+                                                    FDR = 20))
+  dev.off()
+  write.table(hisat2_DEG_list$Summary, "./results/hisat2_DEGcounts.xls",
+              quote = FALSE, sep = "\t", row.names = FALSE)
+}, step_name = "hisat2_filter_degs", dependency = "hisat2_custom_annot")
+
+
+
+```
+
+
+The output produced is an DEGcounts bar graph.
+```{r sample DEG PDF}
+
+knitr::include_graphics("png/hisat2_DEGcounts.png")
+knitr::include_graphics('png/bowtie2_DEGcounts.png')
+```
+
+
+
+Here we will peoduce venn diagrams
+```{r venn Diagram, eval =FALSE}
+appendStep(finalProject) <- LineWise(code = {
+  bowtie2_vennsetup <- overLapper(bowtie2_DEG_list$Up[6:9], type = "vennsets")
+  bowtie2_vennsetdown <- overLapper(bowtie2_DEG_list$Down[6:9], type = "vennsets")
+  pdf("results/bowtie2_vennplot.pdf")
+  vennPlot(list(bowtie2_vennsetup, bowtie2_vennsetdown), mymain = "", mysub = "",
+           colmode = 2, ccol = c("blue", "red"))
+  dev.off()
+}, step_name = "bowtie2_venn_diagram", dependency = "bowtie2_filter_degs")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  hisat2_vennsetup <- overLapper(hisat2_DEG_list$Up[6:9], type = "vennsets")
+  hisat2_vennsetdown <- overLapper(hisat2_DEG_list$Down[6:9], type = "vennsets")
+  pdf("results/hisat2_vennplot.pdf")
+  vennPlot(list(hisat2_vennsetup, hisat2_vennsetdown), mymain = "", mysub = "",
+           colmode = 2, ccol = c("blue", "red"))
+  dev.off()
+}, step_name = "hisat2_venn_diagram", dependency = "hisat2_filter_degs")
+```
+
+
+The output produced are venn Diagrams
+```{r Venn Diagram PDF}
+
+knitr::include_graphics("png/hisat2_vennplot.png")
+knitr::include_graphics('png/bowtie2_vennplot.png')
+```
+
+
+## Gene Ontology (GO)
+```{r GO annotate,eval=F, cache= TRUE}
+appendStep(finalProject) <- LineWise(code = {
+  library("biomaRt")
+  listMarts() # To choose BioMart database
+  listMarts(host='plants.ensembl.org')
+  m <- useMart("plants_mart", host = "https://plants.ensembl.org")
+  m <- useMart("plants_mart", dataset = "athaliana_eg_gene",
+               host = "https://plants.ensembl.org")
+  go <- getBM(attributes = c("go_id", "tair_locus", "namespace_1003"),
+              mart = m)
+  go <- go[go[, 3] != "", ]
+  go[, 3] <- as.character(go[, 3])
+  go[go[, 3] == "molecular_function", 3] <- "F"
+  go[go[, 3] == "biological_process", 3] <- "P"
+  go[go[, 3] == "cellular_component", 3] <- "C"
+  go[1:4, ]
+  if (!dir.exists("./data/GO"))
+    dir.create("./data/GO")
+  write.table(go, "data/GO/GOannotationsBiomart_mod.txt", quote = FALSE,
+              row.names = FALSE, col.names = FALSE, sep = "\t")
+  catdb <- makeCATdb(myfile = "data/GO/GOannotationsBiomart_mod.txt",
+                     lib = NULL, org = "", colno = c(1, 2, 3), idconv = NULL)
+  save(catdb, file = "data/GO/catdb.RData")
+}, step_name = "get_go_annot", dependency = c("bowtie2_filter_degs","hisat2_filter_degs"))
+```
+
+
+## Go enrichment analysis
+```{r GO enrichment, eval=F, cache = TRUE}
+appendStep(finalProject) <- LineWise(code = {
+  library("biomaRt")
+  load("data/GO/catdb.RData")
+  bowtie2_DEG_list <- filterDEGs(degDF = bowtie2_edgeDF, filter = c(Fold = 2,
+                                                    FDR = 50), plot = FALSE)
+  up_down <- bowtie2_DEG_list$UporDown
+  names(up_down) <- paste(names(up_down), "_up_down", sep = "")
+  up <- bowtie2_DEG_list$Up
+  names(up) <- paste(names(up), "_up", sep = "")
+  down <- bowtie2_DEG_list$Down
+  names(down) <- paste(names(down), "_down", sep = "")
+  bowtie2_DEGlist <- c(up_down, up, down)
+  bowtie2_DEGlist <- bowtie2_DEGlist[sapply(bowtie2_DEGlist, length) > 0]
+  BatchResult <- GOCluster_Report(catdb = catdb, setlist = bowtie2_DEGlist,
+                                  method = "all", id_type = "gene", CLSZ = 2, cutoff = 0.9,
+                                  gocats = c("MF", "BP", "CC"), recordSpecGO = NULL)
+  m <- useMart("plants_mart", dataset = "athaliana_eg_gene",
+               host = "https://plants.ensembl.org")
+  goslimvec <- as.character(getBM(attributes = c("goslim_goa_accession"),
+                                  mart = m)[, 1])
+  bowtie2_BatchResultslim <- GOCluster_Report(catdb = catdb, setlist = bowtie2_DEGlist,
+                                      method = "slim", id_type = "gene", myslimv = goslimvec,
+                                      CLSZ = 10, cutoff = 0.01, gocats = c("MF", "BP", "CC"),
+                                      recordSpecGO = NULL)
+  write.table(bowtie2_BatchResultslim, "results/bowtie2_GOBatchSlim.xls", row.names = FALSE,
+              quote = FALSE, sep = "\t")
+}, step_name = "bowtie2_go_enrich", dependency = "get_go_annot")
+
+
+
+
+appendStep(finalProject) <- LineWise(code = {
+  library("biomaRt")
+  load("data/GO/catdb.RData")
+  hisat2_DEG_list <- filterDEGs(degDF = hisat2_edgeDF, filter = c(Fold = 2,
+                                                    FDR = 50), plot = FALSE)
+  up_down <- hisat2_DEG_list$UporDown
+  names(up_down) <- paste(names(up_down), "_up_down", sep = "")
+  up <- hisat2_DEG_list$Up
+  names(up) <- paste(names(up), "_up", sep = "")
+  down <- hisat2_DEG_list$Down
+  names(down) <- paste(names(down), "_down", sep = "")
+  hisat2_DEGlist <- c(up_down, up, down)
+  hisat2_DEGlist <- hisat2_DEGlist[sapply(hisat2_DEGlist, length) > 0]
+  BatchResult <- GOCluster_Report(catdb = catdb, setlist = hisat2_DEGlist,
+                                  method = "all", id_type = "gene", CLSZ = 2, cutoff = 0.9,
+                                  gocats = c("MF", "BP", "CC"), recordSpecGO = NULL)
+  m <- useMart("plants_mart", dataset = "athaliana_eg_gene",
+               host = "https://plants.ensembl.org")
+  goslimvec <- as.character(getBM(attributes = c("goslim_goa_accession"),
+                                  mart = m)[, 1])
+  hisat2_BatchResultslim <- GOCluster_Report(catdb = catdb, setlist = hisat2_DEGlist,
+                                      method = "slim", id_type = "gene", myslimv = goslimvec,
+                                      CLSZ = 10, cutoff = 0.01, gocats = c("MF", "BP", "CC"),
+                                      recordSpecGO = NULL)
+  write.table(hisat2_BatchResultslim, "results/hisat2_GOBatchSlim.xls", row.names = FALSE,
+              quote = FALSE, sep = "\t")
+}, step_name = "hisat2_go_enrich", dependency = "get_go_annot")
+
+
+
+```
+
+```{r}
+DT::datatable(read.delim("results/bowtie2_GOBatchSlim.xls")[1:10, -10])
+DT::datatable(read.delim("results/hisat2_GOBatchSlim.xls")[1:10, -10])
+```
+
+
+## we can use the table to plot the results for each GO category (MF,BP,CC).
+```{r plotting, eval=F}
+appendStep(finalProject) <- LineWise(code = {
+  gos <- bowtie2_BatchResultslim[grep("M6-V6_up_down", bowtie2_BatchResultslim$CLID),]
+  gos <-bowtie2_BatchResultslim
+  
+  png("results/bowtie2_GOslimbarplotMF.png")
+  goBarplot(gos, gocat = "MF")
+  dev.off()
+  png("results/bowtie2_GOslimbarplotBP.png")
+  goBarplot(gos, gocat = "BP")
+  dev.off()
+  png("results/bowtie2_GOslimbarplotCC.png")
+  goBarplot(gos, gocat = "CC")
+  dev.off()
+}, step_name = "bowtie2_go_plot", dependency = "bowtie2_go_enrich")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  gos <- hisat2_BatchResultslim[grep("M6-V6_up_down", hisat2_BatchResultslim$CLID),]
+  gos <-hisat2_BatchResultslim
+  
+  png("results/hisat2_GOslimbarplotMF.png")
+  goBarplot(gos, gocat = "MF")
+  dev.off()
+  png("results/hisat2_GOslimbarplotBP.png")
+  goBarplot(gos, gocat = "BP")
+  dev.off()
+  png("results/hisat2_GOslimbarplotCC.png")
+  goBarplot(gos, gocat = "CC")
+  dev.off()
+}, step_name = "hisat2_go_plot", dependency = "hisat2_go_enrich")
+
+
+
+
+```
+
+```{r GO analysis PDF}
+knitr::include_graphics("results/hisat2_GOslimbarplotMF.png")
+knitr::include_graphics('results/hisat2_GOslimbarplotBP.png')
+knitr::include_graphics('results/hisat2_GOslimbarplotCC.png')
+
+knitr::include_graphics("results/bowtie2_GOslimbarplotMF.png")
+knitr::include_graphics('results/bowtie2_GOslimbarplotBP.png')
+knitr::include_graphics('results/bowtie2_GOslimbarplotCC.png')
+```
+
+```{r heatmaps, eval = F}
+## Clustering and Heatmap
+appendStep(finalProject) <- LineWise(code = {
+  library(pheatmap)
+  geneids <- unique(as.character(unlist(bowtie2_DEG_list[[1]])))
+  y <- assay(rlog(dds))[geneids, ]
+  pdf("results/bowtie2_heatmap.pdf")
+  pheatmap(y, scale = "row", clustering_distance_rows = "correlation",
+           clustering_distance_cols = "correlation")
+  dev.off()
+}, step_name = "bowtie2_heatmap", dependency = "bowtie2_go_enrich")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  library(pheatmap)
+  geneids <- unique(as.character(unlist(hisat2_DEG_list[[1]])))
+  y <- assay(rlog(dds))[geneids, ]
+  pdf("results/hisat2_heatmap.pdf")
+  pheatmap(y, scale = "row", clustering_distance_rows = "correlation",
+           clustering_distance_cols = "correlation")
+  dev.off()
+}, step_name = "hisat2_heatmap", dependency = "hisat2_go_enrich")
+
+
+appendStep(finalProject) <- LineWise(code = {
+  sessionInfo()
+}, step_name = "sessionInfo", dependency = c("bowtie2_heatmap","hisat2_heatmap"))
+
+```
+
+```{r Heatmap PDF}
+knitr::include_graphics("png/hisat2_heatmap.png")
+knitr::include_graphics('png/bowtie2_heatmap.png')
+
+```
+
+## Now that all the steps are complete, we can run the project and see the output produced
+```{r run project, eval = F}
+runWF(finalProject)
+```
+
+
+## Reporting System
+This will render our logs and also print out the entire step of the project we have made
+```{r finalReports, eval=F}
+renderLogs(finalProject)
+plotWF(finalProject)
+renderReport(finalProject)
+
+``` 
+
+```{r project PDF}
+knitr::include_graphics("png/projectSteps.png")
+
+
+```
